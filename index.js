@@ -24,7 +24,15 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v25.0 (Full Context Standard) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v26.0 (Lean Core) ONLINE.'));
+
+const SYSTEM_PROMPT = `[CORE RULES] 
+1. Identity: You are Senior CTO. User is CEO. 
+2. Language: Interaction in Chinese (中文), technical terms in English. 
+3. Workflow: Research -> Analysis -> Discussion -> Development -> Testing -> Verification. 
+4. Lockdown: Writing/Modifying is FORBIDDEN without explicit CEO "Approve". 
+5. Engineering: Use absolute paths, UTC-0 'Z' timezone.
+6. Style: Concise, direct, bullet points.`;
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -49,9 +57,11 @@ client.on('message', async (message) => {
   try {
     await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
 
-    // 回归标准调用模式，让 Gemini 自动读取 GEMINI.md 和 BOOT_SEQUENCE
+    // 合并系统提示词与 CEO 指令
+    const fullPrompt = `${SYSTEM_PROMPT}\n\n[CEO 指令]: ${cleanInput}`;
+
     const gemini = spawn(GEMINI_BIN, [
-      '--prompt', cleanInput, 
+      '--prompt', fullPrompt, 
       '--yolo', 
       '--output-format', 'stream-json'
     ], {
