@@ -24,7 +24,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v23.2 (Protocol Patch) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v23.3 (Long-Connection Aligned) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -35,7 +35,8 @@ client.on('message', async (message) => {
   logToFile(`[CEO] ${cleanInput}`);
 
   if (isBusy) {
-    client.reply(message, { content: '🔴 CTO 正在处理中，请稍后。' }).catch(() => {});
+    const busyStreamId = uuidv4();
+    client.replyStream(message, busyStreamId, '🔴 CTO 正在处理中，请稍后。', true).catch(() => {});
     return;
   }
 
