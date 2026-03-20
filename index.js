@@ -24,7 +24,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v23.3 (Long-Connection Aligned) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v24.0 (Accelerated Stealth) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -56,7 +56,7 @@ client.on('message', async (message) => {
       '--output-format', 'stream-json'
     ], {
       cwd: process.env.HOME || '/root',
-      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
+      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1', GEMINI_SKIP_BOOT: 'true' }
     });
 
     const rl = readline.createInterface({
