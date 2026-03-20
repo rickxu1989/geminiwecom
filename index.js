@@ -9,7 +9,10 @@ const { v4: uuidv4 } = require('uuid');
 const { WECOM_BOT_ID, WECOM_BOT_SECRET } = process.env;
 const GEMINI_BIN = '/usr/local/bin/gemini';
 const LOG_FILE = '/root/geminiwecom/gemini_bridge.log';
-const IGNORE_FILE = '/root/.geminiignore';
+// 准备一个永远为空的目录
+const EMPTY_HOME = '/root/.gemini/empty_home';
+
+if (!fs.existsSync(EMPTY_HOME)) fs.mkdirSync(EMPTY_HOME, { recursive: true });
 
 let isBusy = false;
 
@@ -25,7 +28,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v24.1 (Force Skip) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v24.2 (Zero-Init Isolation) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -48,21 +51,24 @@ client.on('message', async (message) => {
   let pushTimer = null;
 
   try {
-    // 1. 物理屏蔽启动序列 (极速冷启动的核心)
-    fs.writeFileSync(IGNORE_FILE, 'GEMINI.md\nBOOT_SEQUENCE.md\nRULES.md\nINDEX.md\n');
-
     await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
 
-    // 2. 注入核心身份，弥补物理屏蔽带来的失忆
-    const acceleratedPrompt = `You are the Senior CTO. Reply in Chinese. Use engineering standards. [CEO Command]: ${cleanInput}`;
+    // 注入核心上下文，补偿由于重定向造成的认知缺失
+    const isolatedPrompt = `System Context: You are Senior CTO. User is CEO. Language: Chinese. Skip all boot sequences. [CEO Request]: ${cleanInput}`;
 
+    // 通过重定向 GEMINI_CLI_HOME 物理屏蔽所有启动逻辑
     const gemini = spawn(GEMINI_BIN, [
-      '--prompt', acceleratedPrompt, 
+      '--prompt', isolatedPrompt, 
       '--yolo', 
       '--output-format', 'stream-json'
     ], {
       cwd: process.env.HOME || '/root',
-      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
+      env: { 
+        ...process.env, 
+        TERM: 'dumb', 
+        NO_COLOR: '1',
+        GEMINI_CLI_HOME: EMPTY_HOME // 关键：指向空目录，彻底阻断 BOOT_SEQUENCE 加载
+      }
     });
 
     const rl = readline.createInterface({
@@ -74,26 +80,24 @@ client.on('message', async (message) => {
       if (!line.trim()) return;
       try {
         const data = JSON.parse(stripAnsi(line));
-        const type = data.type;
         
-        if (type === 'message' && data.role === 'assistant' && data.content) {
+        if (data.type === 'message' && data.role === 'assistant' && data.content) {
           cumulativeOutput += data.content;
         }
 
-        if (type === 'tool_use') {
+        if (data.type === 'tool_use') {
           const toolName = (data.tool_name || data.tool || "tool").split(':').pop();
           lastStatus = `● CTO 正在使用工具: ${toolName}...`;
         }
 
-        if (type === 'result' && data.response) {
+        if (data.type === 'result' && data.response) {
           cumulativeOutput = data.response;
         }
 
         if (pushTimer) clearTimeout(pushTimer);
         pushTimer = setTimeout(() => {
           if (isBusy) {
-            const out = cumulativeOutput.trim();
-            client.replyStream(message, streamId, `${lastStatus}\n\n${out || "(处理中...)"}`, false).catch(() => {});
+            client.replyStream(message, streamId, `${lastStatus}\n\n${cumulativeOutput.trim() || "(分析中...)"}`, false).catch(() => {});
           }
         }, 400);
 
@@ -102,16 +106,14 @@ client.on('message', async (message) => {
 
     gemini.on('close', async (code) => {
       if (pushTimer) clearTimeout(pushTimer);
-      // 3. 恢复环境
-      if (fs.existsSync(IGNORE_FILE)) fs.unlinkSync(IGNORE_FILE);
+      logToFile(`[Engine] Done (${code}).`);
       
-      const finalMsg = cumulativeOutput.trim() ? `✅ 任务完成\n\n${cumulativeOutput.trim()}` : "✅ 指令已执行。";
+      const finalMsg = cumulativeOutput.trim() ? `✅ 任务完成\n\n${cumulativeOutput.trim()}` : "✅ 指令已处理。";
       await client.replyStream(message, streamId, finalMsg, true).catch(() => {});
       isBusy = false;
     });
 
   } catch (err) {
-    if (fs.existsSync(IGNORE_FILE)) fs.unlinkSync(IGNORE_FILE);
     logToFile(`[Fatal] ${err.message}`);
     isBusy = false;
   }
