@@ -1,0 +1,24 @@
+{
+  "name": "geminiwecom",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.3",
+    "axios": "^1.13.6",
+    "dotenv": "^17.3.1",
+    "node-pty": "^1.1.0",
+    "playwright": "^1.58.2",
+    "playwright-core": "^1.58.2",
+    "strip-ansi": "^6.0.1",
+    "uuid": "^13.0.0",
+    "ws": "^8.19.0"
+  }
+}
