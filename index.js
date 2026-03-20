@@ -3,6 +3,7 @@ const { WSClient } = require('@wecom/aibot-node-sdk');
 const { spawn } = require('child_process');
 const readline = require('readline');
 const fs = require('fs');
+const stripAnsi = require('strip-ansi');
 const { v4: uuidv4 } = require('uuid');
 
 const { WECOM_BOT_ID, WECOM_BOT_SECRET } = process.env;
@@ -23,7 +24,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v23.0 (Stream-JSON Protocol) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v23.2 (Protocol Patch) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -34,23 +35,20 @@ client.on('message', async (message) => {
   logToFile(`[CEO] ${cleanInput}`);
 
   if (isBusy) {
-    client.reply(message, { msgtype: 'text', text: { content: '🔴 CTO 正在处理中，请稍后。' } }).catch(() => {});
+    client.reply(message, { content: '🔴 CTO 正在处理中，请稍后。' }).catch(() => {});
     return;
   }
 
   isBusy = true;
   const streamId = uuidv4();
   let cumulativeOutput = "";
-  let lastStatus = "● 首席技术官正在思考...";
+  let lastStatus = "● 首席技术官正在执行...";
   let pushTimer = null;
 
-  // 1. 立即反馈初始状态
-  await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
-
   try {
-    logToFile('[Engine] Executing stream-json spawn...');
-    
-    // 使用 stream-json 模式，每一行都是一个 JSON 对象
+    // 立即发送初始状态
+    await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
+
     const gemini = spawn(GEMINI_BIN, [
       '--prompt', cleanInput, 
       '--yolo', 
@@ -70,69 +68,74 @@ client.on('message', async (message) => {
       fs.appendFileSync(LOG_FILE + '.raw', line + '\n');
 
       try {
-        const data = JSON.parse(line);
+        // 移除可能存在的隐藏字符或 ANSI
+        const cleanLine = stripAnsi(line.trim());
+        const data = JSON.parse(cleanLine);
         
-        // A. 处理消息片段 (100% 纯净内容)
-        if (data.type === 'message' && data.role === 'assistant') {
+        // A. 兼容性字段提取
+        const type = data.type;
+        const content = data.content || data.response;
+        const toolName = data.tool_name || data.tool || (data.arguments ? "unknown_tool" : null);
+
+        // B. 处理消息内容
+        if (type === 'message' && data.role === 'assistant' && data.content) {
           cumulativeOutput += data.content;
-          
-          if (pushTimer) clearTimeout(pushTimer);
-          pushTimer = setTimeout(() => {
-            if (cumulativeOutput.trim()) {
-              const fullMsg = `${lastStatus}\n\n${cumulativeOutput.trim()}`;
-              client.replyStream(message, streamId, fullMsg, false).catch(() => {});
-            }
-          }, 300);
         }
 
-        // B. 处理工具调用 (增强交互感)
-        if (data.type === 'tool_use') {
-          const toolName = data.tool.split(':').pop(); // 简化工具名
-          lastStatus = `● CTO 正在使用工具: ${toolName}...`;
-          client.replyStream(message, streamId, lastStatus + (cumulativeOutput ? `\n\n${cumulativeOutput.trim()}` : ""), false).catch(() => {});
-          logToFile(`[Tool] Using ${data.tool}`);
+        // C. 处理工具使用
+        if (type === 'tool_use' && toolName) {
+          lastStatus = `● CTO 正在使用工具: ${toolName.split(':').pop()}...`;
+          logToFile(`[Tool] ${toolName}`);
         }
 
-        // C. 处理最终结果
-        if (data.type === 'result') {
-          // data.response 包含最终完整的回答
+        // D. 处理最终结果 (针对某些模式下 result 事件不带 message 的情况)
+        if (type === 'result' && data.response) {
           cumulativeOutput = data.response;
-          logToFile(`[Task] Result received. Tokens: ${data.stats?.total_tokens || 'N/A'}`);
         }
+
+        // 统一推送逻辑
+        if (pushTimer) clearTimeout(pushTimer);
+        pushTimer = setTimeout(() => {
+          if (isBusy) {
+            const out = cumulativeOutput.trim();
+            const display = `${lastStatus}\n\n${out || "(正在准备数据...)"}`;
+            client.replyStream(message, streamId, display, false).catch(() => {});
+          }
+        }, 400);
 
       } catch (err) {
-        logToFile(`[JSON Error] Failed to parse line: ${line.substring(0, 100)}...`);
+        // logToFile(`[JSON Parse Error] ${err.message}`);
       }
     });
 
-    // 错误流记录 (方便排查底层报错)
     gemini.stderr.on('data', (data) => {
       fs.appendFileSync(LOG_FILE + '.err', data.toString());
     });
 
     gemini.on('close', async (code) => {
       if (pushTimer) clearTimeout(pushTimer);
-      logToFile(`[Engine] Process closed (code ${code}).`);
+      logToFile(`[Engine] Closed (${code}).`);
       
       const finalMsg = cumulativeOutput.trim() 
-        ? `✅ 任务执行完毕\n\n${cumulativeOutput.trim()}` 
-        : "✅ 指令已处理完成。";
+        ? `✅ 任务已完成\n\n${cumulativeOutput.trim()}` 
+        : "✅ 指令已接收执行。";
       
       await client.replyStream(message, streamId, finalMsg, true).catch(() => {});
+      
+      // 绝对解锁
       isBusy = false;
     });
 
-    // 超时保护
+    // 强制超时
     setTimeout(() => {
       if (isBusy) {
         gemini.kill('SIGKILL');
-        logToFile('[Timeout] Task forced kill after 120s.');
+        isBusy = false; 
       }
-    }, 120000);
+    }, 180000); // 增加到 3 分钟，给复杂任务时间
 
   } catch (err) {
-    logToFile(`[Bridge Error] ${err.message}`);
-    client.reply(message, { msgtype: 'text', text: { content: `❌ 执行异常: ${err.message}` } }).catch(() => {});
+    logToFile(`[Fatal] ${err.message}`);
     isBusy = false;
   }
 });
