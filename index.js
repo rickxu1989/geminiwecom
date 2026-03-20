@@ -9,10 +9,6 @@ const { v4: uuidv4 } = require('uuid');
 const { WECOM_BOT_ID, WECOM_BOT_SECRET } = process.env;
 const GEMINI_BIN = '/usr/local/bin/gemini';
 const LOG_FILE = '/root/geminiwecom/gemini_bridge.log';
-// 准备一个永远为空的目录
-const EMPTY_HOME = '/root/.gemini/empty_home';
-
-if (!fs.existsSync(EMPTY_HOME)) fs.mkdirSync(EMPTY_HOME, { recursive: true });
 
 let isBusy = false;
 
@@ -28,7 +24,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v24.2 (Zero-Init Isolation) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v25.0 (Full Context Standard) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -53,22 +49,14 @@ client.on('message', async (message) => {
   try {
     await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
 
-    // 注入核心上下文，补偿由于重定向造成的认知缺失
-    const isolatedPrompt = `System Context: You are Senior CTO. User is CEO. Language: Chinese. Skip all boot sequences. [CEO Request]: ${cleanInput}`;
-
-    // 通过重定向 GEMINI_CLI_HOME 物理屏蔽所有启动逻辑
+    // 回归标准调用模式，让 Gemini 自动读取 GEMINI.md 和 BOOT_SEQUENCE
     const gemini = spawn(GEMINI_BIN, [
-      '--prompt', isolatedPrompt, 
+      '--prompt', cleanInput, 
       '--yolo', 
       '--output-format', 'stream-json'
     ], {
       cwd: process.env.HOME || '/root',
-      env: { 
-        ...process.env, 
-        TERM: 'dumb', 
-        NO_COLOR: '1',
-        GEMINI_CLI_HOME: EMPTY_HOME // 关键：指向空目录，彻底阻断 BOOT_SEQUENCE 加载
-      }
+      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
     });
 
     const rl = readline.createInterface({
