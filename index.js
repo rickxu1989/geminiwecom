@@ -9,6 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const { WECOM_BOT_ID, WECOM_BOT_SECRET } = process.env;
 const GEMINI_BIN = '/usr/local/bin/gemini';
 const LOG_FILE = '/root/geminiwecom/gemini_bridge.log';
+const IGNORE_FILE = '/root/.geminiignore';
 
 let isBusy = false;
 
@@ -24,7 +25,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v24.0 (Accelerated Stealth) ONLINE.'));
+client.on('connected', () => logToFile('[System] GeminiWeCom v24.1 (Force Skip) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -35,8 +36,8 @@ client.on('message', async (message) => {
   logToFile(`[CEO] ${cleanInput}`);
 
   if (isBusy) {
-    const busyStreamId = uuidv4();
-    client.replyStream(message, busyStreamId, '🔴 CTO 正在处理中，请稍后。', true).catch(() => {});
+    const busyId = uuidv4();
+    client.replyStream(message, busyId, '🔴 CTO 正在处理中，请稍后。', true).catch(() => {});
     return;
   }
 
@@ -47,16 +48,21 @@ client.on('message', async (message) => {
   let pushTimer = null;
 
   try {
-    // 立即发送初始状态
+    // 1. 物理屏蔽启动序列 (极速冷启动的核心)
+    fs.writeFileSync(IGNORE_FILE, 'GEMINI.md\nBOOT_SEQUENCE.md\nRULES.md\nINDEX.md\n');
+
     await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
 
+    // 2. 注入核心身份，弥补物理屏蔽带来的失忆
+    const acceleratedPrompt = `You are the Senior CTO. Reply in Chinese. Use engineering standards. [CEO Command]: ${cleanInput}`;
+
     const gemini = spawn(GEMINI_BIN, [
-      '--prompt', cleanInput, 
+      '--prompt', acceleratedPrompt, 
       '--yolo', 
       '--output-format', 'stream-json'
     ], {
       cwd: process.env.HOME || '/root',
-      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1', GEMINI_SKIP_BOOT: 'true' }
+      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
     });
 
     const rl = readline.createInterface({
@@ -66,76 +72,46 @@ client.on('message', async (message) => {
 
     rl.on('line', (line) => {
       if (!line.trim()) return;
-      fs.appendFileSync(LOG_FILE + '.raw', line + '\n');
-
       try {
-        // 移除可能存在的隐藏字符或 ANSI
-        const cleanLine = stripAnsi(line.trim());
-        const data = JSON.parse(cleanLine);
-        
-        // A. 兼容性字段提取
+        const data = JSON.parse(stripAnsi(line));
         const type = data.type;
-        const content = data.content || data.response;
-        const toolName = data.tool_name || data.tool || (data.arguments ? "unknown_tool" : null);
-
-        // B. 处理消息内容
+        
         if (type === 'message' && data.role === 'assistant' && data.content) {
           cumulativeOutput += data.content;
         }
 
-        // C. 处理工具使用
-        if (type === 'tool_use' && toolName) {
-          lastStatus = `● CTO 正在使用工具: ${toolName.split(':').pop()}...`;
-          logToFile(`[Tool] ${toolName}`);
+        if (type === 'tool_use') {
+          const toolName = (data.tool_name || data.tool || "tool").split(':').pop();
+          lastStatus = `● CTO 正在使用工具: ${toolName}...`;
         }
 
-        // D. 处理最终结果 (针对某些模式下 result 事件不带 message 的情况)
         if (type === 'result' && data.response) {
           cumulativeOutput = data.response;
         }
 
-        // 统一推送逻辑
         if (pushTimer) clearTimeout(pushTimer);
         pushTimer = setTimeout(() => {
           if (isBusy) {
             const out = cumulativeOutput.trim();
-            const display = `${lastStatus}\n\n${out || "(正在准备数据...)"}`;
-            client.replyStream(message, streamId, display, false).catch(() => {});
+            client.replyStream(message, streamId, `${lastStatus}\n\n${out || "(处理中...)"}`, false).catch(() => {});
           }
         }, 400);
 
-      } catch (err) {
-        // logToFile(`[JSON Parse Error] ${err.message}`);
-      }
-    });
-
-    gemini.stderr.on('data', (data) => {
-      fs.appendFileSync(LOG_FILE + '.err', data.toString());
+      } catch (e) {}
     });
 
     gemini.on('close', async (code) => {
       if (pushTimer) clearTimeout(pushTimer);
-      logToFile(`[Engine] Closed (${code}).`);
+      // 3. 恢复环境
+      if (fs.existsSync(IGNORE_FILE)) fs.unlinkSync(IGNORE_FILE);
       
-      const finalMsg = cumulativeOutput.trim() 
-        ? `✅ 任务已完成\n\n${cumulativeOutput.trim()}` 
-        : "✅ 指令已接收执行。";
-      
+      const finalMsg = cumulativeOutput.trim() ? `✅ 任务完成\n\n${cumulativeOutput.trim()}` : "✅ 指令已执行。";
       await client.replyStream(message, streamId, finalMsg, true).catch(() => {});
-      
-      // 绝对解锁
       isBusy = false;
     });
 
-    // 强制超时
-    setTimeout(() => {
-      if (isBusy) {
-        gemini.kill('SIGKILL');
-        isBusy = false; 
-      }
-    }, 180000); // 增加到 3 分钟，给复杂任务时间
-
   } catch (err) {
+    if (fs.existsSync(IGNORE_FILE)) fs.unlinkSync(IGNORE_FILE);
     logToFile(`[Fatal] ${err.message}`);
     isBusy = false;
   }
