@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { WSClient } = require('@wecom/aibot-node-sdk');
 const { spawn } = require('child_process');
-const stripAnsi = require('strip-ansi');
+const readline = require('readline');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
@@ -23,33 +23,7 @@ const client = new WSClient({
   autoReconnect: true
 });
 
-client.on('connected', () => logToFile('[System] GeminiWeCom v22.0 (YOLO Cold-Boot) ONLINE.'));
-
-// 强力去噪过滤器
-function filterNoise(text) {
-  const lines = text.split('\n');
-  let clean = "";
-  for (let l of lines) {
-    let t = l.trim();
-    if (!t) continue;
-    
-    // 去除所有边框字符
-    if (/[─╭╰│]/.test(t)) continue;
-    
-    // 去除系统提示
-    if (t.includes('Waiting for authentication')) continue;
-    if (t.includes('MCP')) continue;
-    if (t.includes('Shift+Tab')) continue;
-    if (t.includes('? for shortcuts')) continue;
-    
-    // 去除英文思考过程
-    if (/^(I (will|'ll|'m|am|now|proceed|begin|search|retrieve|read|check|'ve|have))/i.test(t)) continue;
-    if (/^(Searching|Reading|Checking|Loading|Executing|Refreshed|Authenticating|Scheduling)/i.test(t)) continue;
-
-    clean += t + '\n';
-  }
-  return clean.trim();
-}
+client.on('connected', () => logToFile('[System] GeminiWeCom v23.0 (Stream-JSON Protocol) ONLINE.'));
 
 client.on('message', async (message) => {
   const msgBody = message.body || message;
@@ -60,80 +34,105 @@ client.on('message', async (message) => {
   logToFile(`[CEO] ${cleanInput}`);
 
   if (isBusy) {
-    logToFile('[System] Rejected: Busy');
-    // 发送独立的提示消息，而非 stream，规避 40008
-    client.reply(message, { msgtype: 'text', text: { content: '🔴 CTO 正在处理上一项任务，请稍后。' } }).catch(() => {});
+    client.reply(message, { msgtype: 'text', text: { content: '🔴 CTO 正在处理中，请稍后。' } }).catch(() => {});
     return;
   }
 
   isBusy = true;
   const streamId = uuidv4();
   let cumulativeOutput = "";
+  let lastStatus = "● 首席技术官正在思考...";
   let pushTimer = null;
-  let hasSentFirst = false;
+
+  // 1. 立即反馈初始状态
+  await client.replyStream(message, streamId, lastStatus, false).catch(() => {});
 
   try {
-    // 强制执行模式: YOLO + Text Output + Non-Interactive
-    logToFile('[Engine] Executing cold boot spawn...');
-    const gemini = spawn(GEMINI_BIN, ['--prompt', cleanInput, '--yolo', '--output-format', 'text'], {
+    logToFile('[Engine] Executing stream-json spawn...');
+    
+    // 使用 stream-json 模式，每一行都是一个 JSON 对象
+    const gemini = spawn(GEMINI_BIN, [
+      '--prompt', cleanInput, 
+      '--yolo', 
+      '--output-format', 'stream-json'
+    ], {
       cwd: process.env.HOME || '/root',
-      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1', GEMINI_CLI_INTERACTIVE: 'false' }
+      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' }
     });
 
-    // 强行阻断进程死锁
-    const timeout = setTimeout(() => {
-      logToFile('[Error] Process Timeout (60s). Killing.');
-      gemini.kill('SIGKILL');
-    }, 60000);
+    const rl = readline.createInterface({
+      input: gemini.stdout,
+      terminal: false
+    });
 
-    gemini.stdout.on('data', (data) => {
-      const rawText = stripAnsi(data.toString());
-      fs.appendFileSync(LOG_FILE + '.raw', rawText); // Debug 用
+    rl.on('line', (line) => {
+      if (!line.trim()) return;
+      fs.appendFileSync(LOG_FILE + '.raw', line + '\n');
 
-      const filtered = filterNoise(rawText);
-      if (filtered) {
-        cumulativeOutput += filtered + '\n';
-
-        if (pushTimer) clearTimeout(pushTimer);
-        pushTimer = setTimeout(async () => {
-          if (cumulativeOutput.trim()) {
-            try {
-              if (!hasSentFirst) {
-                // 第一包加上前缀以示区分
-                await client.replyStream(message, streamId, "● 分析中...\n" + cumulativeOutput.trim(), false);
-                hasSentFirst = true;
-              } else {
-                await client.replyStream(message, streamId, "● 分析中...\n" + cumulativeOutput.trim(), false);
-              }
-            } catch (e) {
-              logToFile(`[Stream Error] ${e.message}`);
+      try {
+        const data = JSON.parse(line);
+        
+        // A. 处理消息片段 (100% 纯净内容)
+        if (data.type === 'message' && data.role === 'assistant') {
+          cumulativeOutput += data.content;
+          
+          if (pushTimer) clearTimeout(pushTimer);
+          pushTimer = setTimeout(() => {
+            if (cumulativeOutput.trim()) {
+              const fullMsg = `${lastStatus}\n\n${cumulativeOutput.trim()}`;
+              client.replyStream(message, streamId, fullMsg, false).catch(() => {});
             }
-          }
-        }, 500);
+          }, 300);
+        }
+
+        // B. 处理工具调用 (增强交互感)
+        if (data.type === 'tool_use') {
+          const toolName = data.tool.split(':').pop(); // 简化工具名
+          lastStatus = `● CTO 正在使用工具: ${toolName}...`;
+          client.replyStream(message, streamId, lastStatus + (cumulativeOutput ? `\n\n${cumulativeOutput.trim()}` : ""), false).catch(() => {});
+          logToFile(`[Tool] Using ${data.tool}`);
+        }
+
+        // C. 处理最终结果
+        if (data.type === 'result') {
+          // data.response 包含最终完整的回答
+          cumulativeOutput = data.response;
+          logToFile(`[Task] Result received. Tokens: ${data.stats?.total_tokens || 'N/A'}`);
+        }
+
+      } catch (err) {
+        logToFile(`[JSON Error] Failed to parse line: ${line.substring(0, 100)}...`);
       }
     });
 
+    // 错误流记录 (方便排查底层报错)
     gemini.stderr.on('data', (data) => {
       fs.appendFileSync(LOG_FILE + '.err', data.toString());
     });
 
     gemini.on('close', async (code) => {
-      clearTimeout(timeout);
       if (pushTimer) clearTimeout(pushTimer);
-      
-      logToFile(`[Task] Finished with code ${code}.`);
+      logToFile(`[Engine] Process closed (code ${code}).`);
       
       const finalMsg = cumulativeOutput.trim() 
-        ? "● 分析完成\n" + cumulativeOutput.trim() 
-        : "✅ 指令已接收执行，但无文本回复。";
+        ? `✅ 任务执行完毕\n\n${cumulativeOutput.trim()}` 
+        : "✅ 指令已处理完成。";
       
       await client.replyStream(message, streamId, finalMsg, true).catch(() => {});
       isBusy = false;
     });
 
+    // 超时保护
+    setTimeout(() => {
+      if (isBusy) {
+        gemini.kill('SIGKILL');
+        logToFile('[Timeout] Task forced kill after 120s.');
+      }
+    }, 120000);
+
   } catch (err) {
-    logToFile(`[Spawn Error] ${err.message}`);
-    client.reply(message, { msgtype: 'text', text: { content: `❌ 系统错误: ${err.message}` } }).catch(() => {});
+    logToFile(`[Bridge Error] ${err.message}`);
+    client.reply(message, { msgtype: 'text', text: { content: `❌ 执行异常: ${err.message}` } }).catch(() => {});
     isBusy = false;
   }
 });
