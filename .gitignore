@@ -3,3 +3,9 @@ node_modules/
 *.log
 *.raw
 *.err
+history/
+logs/
+*.bak
+test_session.js
+history_test/
+logs_test/
